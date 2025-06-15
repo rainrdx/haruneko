@@ -118,7 +118,7 @@ export class DRMProvider {
             : { name: 'ECDH', public: await crypto.subtle.importKey('raw', cdnPublicKey, _a.#keyExchangeAlgorithm, true, []) };
 
         // The target key in this legacy path is always derived for AES-CBC decryption.
-        const targetKeyParams = { name: 'AES-CBC', length: 256 };
+        const targetKeyParams = { name: (profileName === 'PBKDF2' ? 'AES-CBC' : profileName), length: 256 };
 
         return crypto.subtle.deriveKey(
             derivationParams,
@@ -220,11 +220,15 @@ export class DRMProvider {
                 const unencryptedTail = payload.subarray(sizeEncryptedPartition);
 
                 const decryptionCipherName = (cipherName === 'PBKDF2') ? 'AES-CBC' : cipherName;
-                let decryptParams = { name: decryptionCipherName, iv: iv };
-                if (decryptionCipherName === 'AES-GCM') decryptParams.additionalData = salt;
-                else if (decryptionCipherName === 'AES-CTR') {
+                const decryptParams = { name: decryptionCipherName, iv: iv };
+                if (decryptionCipherName === 'AES-GCM') {
+                    decryptParams.additionalData = salt;
+                } else if (decryptionCipherName === 'AES-CTR') {
+                    // The original code uses the salt as the counter if present, otherwise falls back to the IV.
                     decryptParams.counter = salt ?? iv;
-                    decryptParams.length = 64;
+                    // The original code calculates length as (iv.length * 8 / 2), which is 64.
+                    // We replicate this calculation for perfect accuracy.
+                    decryptParams.length = (iv.length * 8) / 2;
                 }
 
                 const decryptedPartition = new Uint8Array(await crypto.subtle.decrypt(decryptParams, decryptionKey, encryptedPartition));
@@ -237,7 +241,7 @@ export class DRMProvider {
                 resolve(finalData.buffer);
             } catch (error) {
                 // Prepend error message for easier debugging.
-                error.message = `DRM decryption failed: ${error.message}`;
+                throw new Error(`DRM decryption failed: ${error.message || error}`);
                 reject(error);
             }
         });
