@@ -45,7 +45,7 @@ export class DRMProvider {
          * 🛡️ Profile 7 is a legacy profile. Its name correctly identifies that the
          * PBKDF2 key derivation function must be used. Analysis of the code's evolution
          * shows that PBKDF2 was the KDF in a much older DRM version. This profile was
-         * re-introduced in this version to ensure backward compatibility with older assets.
+         * re-introduced in this version to ensure backward compatibility with content.
          */
         '7': {
             cipherName: 'PBKDF2',
@@ -84,7 +84,7 @@ export class DRMProvider {
      * @async
      * @returns {Promise<string>} The Base64-encoded public key.
      */
-    async getPublicKey() {
+    async GetPublicKey() {
         const keyPair = await this.#keyExchange;
         const rawPublicKey = await crypto.subtle.exportKey('raw', keyPair.publicKey);
         return GetBase64FromBytes(new Uint8Array(rawPublicKey));
@@ -112,7 +112,7 @@ export class DRMProvider {
     async #deriveLegacyDecryptionKey(profileName, cdnPublicKey) {
         // The parameters for the key derivation depend on the specific legacy profile.
         const derivationParams = (profileName === 'PBKDF2')
-            // For Profile 7, use the legacy PBKDF2 derivation with the CDN public key as salt material.
+            // For Profile 7, use the legacy PBKDF2 derivation.
             ? { name: 'PBKDF2', hash: 'SHA-256', salt: cdnPublicKey, iterations: 100000 }
             // For other legacy profiles like AES-CBC/CTR, use direct ECDH derivation.
             : { name: 'ECDH', public: await crypto.subtle.importKey('raw', cdnPublicKey, _a.#keyExchangeAlgorithm, true, []) };
@@ -160,14 +160,14 @@ export class DRMProvider {
      * A utility function to build image URLs with specific resolution parameters.
      * This is part of the "Image Token Mechanism" (图片令牌机制) described in the disclosure.
      * @param {string} origin - The base origin for the image assets (e.g., 'https://manga.bilibili.com').
-     * @param {string} imageKey - A key or token, which in the calling code is the image format (e.g., '.png').
+     * @param {string} extension - The desired image extension, used as a key in the URL.
      * @param {Array<object>} images - An array of image objects with path and resolution info.
      * @returns {string} A JSON string containing an array of the generated image URLs.
      */
-    createImageLinks(origin, imageKey, images) {
+    CreateImageLinks(origin, extension, images) {
         const urls = images.map((item) => {
             const width = item.x > 0 ? 1600 : 1100; // Select image width based on a quality flag.
-            return new URL(`${item.path}@${width}w${imageKey}`, origin).href;
+            return new URL(`${item.path}@${width}w${extension}`, origin).href;
         });
         return JSON.stringify(urls);
     }
@@ -179,11 +179,11 @@ export class DRMProvider {
      * @param {Response} response - The `fetch` response object containing the encrypted data.
      * @returns {Promise<ArrayBuffer>} An ArrayBuffer containing the decrypted data.
      */
-    extractImageData(response) {
+    ExtractImageData(response) {
         // The `cpx` parameter contains Base64-encoded crypto info like the IV and salt.
         const serverParamsB64 = new URL(response.url).searchParams.get('cpx') || new URL(response.url).searchParams.get('key');
         if (!serverParamsB64) throw new Error('DRM Error: Missing crypto parameters in response URL.');
-        
+
         const bufferPromise = response.arrayBuffer();
 
         // This function is async, so we return a promise that resolves with the final buffer.
@@ -192,33 +192,33 @@ export class DRMProvider {
                 const buffer = await bufferPromise;
                 const fullData = new Uint8Array(buffer);
                 const view = new DataView(buffer);
-        
+
                 // Step 1: Parse metadata from the payload to identify the encryption profile.
                 const profileId = view.getUint8(0).toString();
                 const profile = _a.#profiles[profileId];
                 if (!profile) return reject(new Error(`DRM Error: Unknown profile ID: ${profileId}`));
-        
+
                 const { cipherName, offsetSalt, offsetIV, sizeEncryptedPartition } = profile;
-        
+
                 const payloadLength = view.getUint32(1);
                 const payload = fullData.subarray(5, 5 + payloadLength);
                 const cdnPublicKey = fullData.subarray(-65);
-        
+
                 const serverParamsBytes = GetBytesFromBase64(serverParamsB64);
                 const iv = serverParamsBytes.subarray(offsetIV, offsetIV + _a.#sizeSalt);
                 const salt = offsetSalt ? serverParamsBytes.subarray(offsetSalt, offsetSalt + _a.#sizeSalt) : undefined;
-        
+
                 // Step 2: Dispatch to the correct key derivation function based on the profile.
                 const decryptionKey = (cipherName === 'AES-GCM')
                     ? await this.#deriveDecryptionKey(cipherName, cdnPublicKey, salt)
                     : await this.#deriveLegacyDecryptionKey(cipherName, cdnPublicKey);
-        
+
                 if (!decryptionKey) return reject(new Error(`DRM Error: Failed to derive key for profile: ${cipherName}`));
-        
+
                 // Step 3: Decrypt the encrypted portion of the data.
                 const encryptedPartition = payload.subarray(0, sizeEncryptedPartition);
                 const unencryptedTail = payload.subarray(sizeEncryptedPartition);
-        
+
                 const decryptionCipherName = (cipherName === 'PBKDF2') ? 'AES-CBC' : cipherName;
                 let decryptParams = { name: decryptionCipherName, iv: iv };
                 if (decryptionCipherName === 'AES-GCM') decryptParams.additionalData = salt;
@@ -226,16 +226,18 @@ export class DRMProvider {
                     decryptParams.counter = salt ?? iv;
                     decryptParams.length = 64;
                 }
-        
+
                 const decryptedPartition = new Uint8Array(await crypto.subtle.decrypt(decryptParams, decryptionKey, encryptedPartition));
-        
+
                 // Step 4: Reconstruct the original data and resolve the promise.
                 const finalData = new Uint8Array(decryptedPartition.length + unencryptedTail.length);
                 finalData.set(decryptedPartition);
                 finalData.set(unencryptedTail, decryptedPartition.length);
-        
+
                 resolve(finalData.buffer);
             } catch (error) {
+                // Prepend error message for easier debugging.
+                error.message = `DRM decryption failed: ${error.message}`;
                 reject(error);
             }
         });
@@ -251,7 +253,7 @@ export class DRMProvider {
      * @param {boolean} [withFingerprint=true] - Whether to include a device fingerprint.
      * @returns {Promise<any>} The JSON response from the API.
      */
-    fetchTwirp(uri, path, payload, withFingerprint = true) {
+    FetchTwirp(uri, path, payload, withFingerprint = true) {
         const endpointUrl = new URL(`/twirp/comic.v1.Comic/${path}`, uri);
         endpointUrl.search = new URLSearchParams({ device: 'pc', platform: 'web', nov: '27' }).toString();
 
